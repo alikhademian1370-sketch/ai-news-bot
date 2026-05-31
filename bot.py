@@ -71,8 +71,6 @@ def has_keyword(text, keywords):
     return any(kw.lower() in text_lower for kw in keywords)
 
 def extract_image_from_entry(entry):
-    """عکس رو از داخل RSS entry استخراج می‌کنه"""
-    
     # روش ۱: media:content
     media_content = entry.get("media_content", [])
     if media_content:
@@ -92,7 +90,7 @@ def extract_image_from_entry(entry):
         if "image" in enc.get("type", ""):
             return enc.get("href", "")
 
-    # روش ۴: عکس داخل محتوای HTML خبر
+    # روش ۴: عکس داخل محتوای HTML
     content = ""
     if entry.get("content"):
         content = entry["content"][0].get("value", "")
@@ -110,7 +108,6 @@ def extract_image_from_entry(entry):
     return None
 
 def fetch_article_summary(url):
-    """فقط خلاصه متن رو از صفحه خبر می‌گیره"""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -118,21 +115,15 @@ def fetch_article_summary(url):
         resp = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # روش ۱: og:description
         og_desc = soup.find("meta", property="og:description")
         if og_desc and og_desc.get("content"):
             summary = og_desc["content"].strip()
-            if len(summary) > 200:
-                summary = summary[:197] + "..."
-            return summary
+            return summary[:197] + "..." if len(summary) > 200 else summary
 
-        # روش ۲: meta description
         meta_desc = soup.find("meta", attrs={"name": "description"})
         if meta_desc and meta_desc.get("content"):
             summary = meta_desc["content"].strip()
-            if len(summary) > 200:
-                summary = summary[:197] + "..."
-            return summary
+            return summary[:197] + "..." if len(summary) > 200 else summary
 
     except Exception as e:
         print(f"خطا در fetch_article_summary: {e}")
@@ -149,7 +140,6 @@ def fetch_rss_news(source):
             summary = entry.get("summary", "")
             link = entry.get("link", "")
             if has_keyword(title + " " + summary, source["keywords"]):
-                # عکس رو از RSS بگیر
                 image_url = extract_image_from_entry(entry)
                 news.append({
                     "title": title,
@@ -178,7 +168,6 @@ def fetch_scrape_news(source):
                 if link and not link.startswith("http"):
                     base = source["url"].rstrip("/")
                     link = base + "/" + link.lstrip("/")
-                # عکس از داخل article
                 img_tag = article.find("img")
                 image_url = None
                 if img_tag:
@@ -207,18 +196,69 @@ def send_telegram_text(text):
     if not resp.ok:
         print(f"خطا در ارسال تلگرام: {resp.text}")
 
+# ───────────── تابع جدید: دانلود عکس ─────────────
+def download_image(image_url):
+    """
+    عکس رو از سایت دانلود می‌کنه و به صورت bytes برمی‌گردونه.
+    اگه موفق نشد، None برمی‌گردونه.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": image_url,  # بعضی سایت‌ها Referer چک می‌کنن
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        resp = requests.get(image_url, headers=headers, timeout=15)
+        content_type = resp.headers.get("Content-Type", "")
+
+        # مطمئن بشیم فایل واقعاً عکسه
+        if resp.ok and "image" in content_type:
+            return resp.content, content_type
+        else:
+            print(f"دانلود عکس ناموفق — status: {resp.status_code}, type: {content_type}")
+            return None, None
+    except Exception as e:
+        print(f"خطا در دانلود عکس: {e}")
+        return None, None
+
+# ───────────── تابع اصلاح‌شده: ارسال عکس ─────────────
 def send_telegram_photo(image_url, caption):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    data = {
-        "chat_id": CHAT_ID,
-        "photo": image_url,
-        "caption": caption,
-        "parse_mode": "HTML"
-    }
-    resp = requests.post(url, data=data, timeout=15)
-    if not resp.ok:
-        print(f"خطا در ارسال عکس، ارسال بدون عکس: {resp.text}")
-        send_telegram_text(caption)
+    """
+    عکس رو ابتدا دانلود می‌کنه، بعد با multipart/form-data به تلگرام می‌فرسته.
+    اگه دانلود یا ارسال شکست خورد، متن رو بدون عکس می‌فرسته.
+    """
+    image_data, content_type = download_image(image_url)
+
+    if image_data:
+        # پسوند فایل رو از content_type تشخیص بده
+        ext = "jpg"
+        if content_type:
+            if "png" in content_type:
+                ext = "png"
+            elif "webp" in content_type:
+                ext = "webp"
+            elif "gif" in content_type:
+                ext = "gif"
+
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        data = {
+            "chat_id": CHAT_ID,
+            "caption": caption,
+            "parse_mode": "HTML"
+        }
+        files = {
+            "photo": (f"image.{ext}", image_data, content_type or "image/jpeg")
+        }
+        resp = requests.post(url, data=data, files=files, timeout=30)
+
+        if resp.ok:
+            return  # موفق بود، تموم شد
+        else:
+            print(f"خطا در ارسال عکس به تلگرام: {resp.text}")
+
+    # fallback: اگه عکس نیومد یا ارسال شکست خورد
+    send_telegram_text(caption)
 
 def send_news_item(item):
     title = item["title"]
@@ -266,7 +306,7 @@ def main():
         time.sleep(0.5)
 
         for item in articles[:5]:
-            # اگه عکس از RSS نیومد، از صفحه خبر بگیر
+            # اگه عکس از RSS نیومد، از og:image صفحه خبر بگیر
             if not item.get("image_url") and item["link"]:
                 try:
                     headers = {"User-Agent": "Mozilla/5.0"}
@@ -278,7 +318,7 @@ def main():
                     og_desc = soup.find("meta", property="og:description")
                     if og_desc and og_desc.get("content"):
                         item["summary"] = og_desc["content"][:200]
-                except:
+                except Exception:
                     pass
 
             send_news_item(item)
@@ -290,4 +330,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
